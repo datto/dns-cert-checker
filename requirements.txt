@@ -1,0 +1,3 @@
+dnspython
+nassl
+sslyze>=4.0
