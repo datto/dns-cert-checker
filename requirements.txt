@@ -1,3 +1,3 @@
 dnspython
 nassl
-sslyze>=4.0
+sslyze>=4.0,<5.0

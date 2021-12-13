@@ -20,20 +20,19 @@
 # file, You can obtain one at <https://mozilla.org/MPL/2.0/>.
 
 import argparse
-import csv
-import datetime
-import json
-import logging
-import multiprocessing
-import os
-import time
 from collections import defaultdict
 from concurrent.futures import as_completed
 from concurrent.futures.thread import ThreadPoolExecutor
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
-
+import csv
+import datetime
 import dns.resolver
+import json
+import logging
+import multiprocessing
 from nassl._nassl import OpenSSLError
+import os
+import re
+import socket
 from sslyze.errors import (ConnectionToServerFailed,
                            ConnectionToServerTimedOut,
                            ServerRejectedConnection,
@@ -43,6 +42,8 @@ from sslyze.scanner import Scanner, ServerScanRequest
 from sslyze.scanner.server_scan_request import ServerScanResult
 from sslyze.server_connectivity import ServerConnectivityTester
 from sslyze.server_setting import ServerNetworkLocationViaDirectConnection
+import time
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 RUN_TIME_TIMESTAMP = int(time.time())
 
@@ -50,9 +51,36 @@ logging.basicConfig()
 LOGGER = logging.getLogger()
 
 
+def _emit_stats(
+    endpoint: str,
+    metric: str,
+    fields: Dict[str, float],
+    tags: Dict[str, str]
+):
+    """
+    Emit stats in influx format to a UDP endpoint.
+
+    :param endpoint: A string with a format of <dns endpoint>:<port>
+    :param metric: the name of the metric to produce
+    :param fields: a dictionary of fields and their values
+    :param tags: a dictionary of tags and their values
+    """
+    endpoint, port = endpoint.split(":")
+    tag_str = ",".join([f"{k}={v}" for k, v in tags.items()])
+    field_str = ",".join([f"{k}={v}" for k, v in fields.items()])
+    batch = f"{metric},{tag_str} {field_str}"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.sendto(batch.encode("utf-8"), (endpoint, int(port)))
+    except Exception as e:
+        LOGGER.error(f"Failed to send ({batch}) to {endpoint}:{port} :: {e}")
+
+
 def parse_dns_dict(
     dns_export: Dict[str, List[Dict]],
-    dns_resolver: Optional[dns.resolver.Resolver] = None
+    zone_name: str,
+    dns_resolver: Optional[dns.resolver.Resolver] = None,
+    name_filters: Optional[List] = [],
 ) -> Dict[str, Set[str]]:
     """
     Given a Dict containing A and CNAME records for any number of zones,
@@ -65,87 +93,102 @@ def parse_dns_dict(
     :type dns_export: Dict[str, List[Dict]]
     :return: A lookup table from an IP address to the names bound to it
         (according to the provided dns resolver)
-    :rtype: Dict[str, Set[str]]
+    :rtype: Dict[str, Set[str]], Dict[int, int, int, int]
     """
+    stats = {"cname_records_total": 0, "a_records_total": 0,
+             "filtered_records_total": 0, "ns_exceptions_total": 0}
 
     ip_to_names = defaultdict(lambda: set())
     name_to_ips = defaultdict(lambda: set())
 
-    domain_a_records = defaultdict(lambda: list())
-    domain_cname_records = defaultdict(lambda: list())
+    domain_a_records = list()
+    domain_cname_records = list()
 
-    LOGGER.info("Processing DNS records")
-    for domain, all_domain_records in dns_export.items():
-        for record in all_domain_records:
+    LOGGER.info("Processing/Filtering DNS records...")
+    for record in dns_export:
 
-            # Pull all A and CNAME records,
-            # but do not process them yet
-            if record["type"] == "A":
-                domain_a_records[domain].append(record)
+        # Pull all A and CNAME records,
+        # but do not process them yet
 
-            elif record["type"] == "CNAME":
-                domain_cname_records[domain].append(record)
+        if record['type'] == 'A':
+            domain_a_records.append(record)
+            stats["a_records_total"] += 1
+
+        elif record['type'] == 'CNAME':
+            domain_cname_records.append(record)
+            stats["cname_records_total"] += 1
 
     # Process the A records first,
-    # to populate a name -> IP mapping
-    for domain_name, a_records in domain_a_records.items():
-        for a_record in a_records:
-            if a_record["name"] == "@":
-                fqdn = domain_name
+    # so we can populate a name -> IP mapping
+    for a_record in domain_a_records:
+        if a_record['name'] == '@':
+            fqdn = zone_name
 
-            else:
-                fqdn = "%s.%s" % (a_record["name"], domain_name)
+        else:
+            fqdn = '%s.%s' % (a_record['name'], zone_name)
 
-            # Note that wildcard DNS entries will appear
-            # with a leading star.
-            #
-            # But since they're wildcard, the star is a valid subdomain!
-            # Thus, we can test on it and ignore other subdomains
-            name_to_ips[fqdn].add(a_record["target"])
-            ip_to_names[a_record["target"]].add(fqdn)
+        if not fqdn.startswith("*") and \
+                any(f.search(fqdn) for f in name_filters):
+            LOGGER.debug(f"Filtering A record {fqdn} from processing")
+            stats["filtered_records_total"] += 1
+            continue
+
+        # Note that wildcard DNS entries will appear
+        # with a leading star.
+        #
+        # But since they're wildcard, the star is a valid subdomain!
+        # Thus, we can test on it and ignore other subdomains
+        name_to_ips[fqdn].add(a_record['target'])
+        ip_to_names[a_record['target']].add(fqdn)
 
     # Now that we have a populated name -> IP mapping,
     # resolve all of the CNAMEs with as few network name lookups as possible
-    for domain_name, cname_records in domain_cname_records.items():
-        for cname_record in cname_records:
-            if cname_record["name"] == "@":
-                fqdn = domain_name
+    for cname_record in domain_cname_records:
+        if cname_record['name'] == '@':
+            fqdn = zone_name
 
-            else:
-                fqdn = "%s.%s" % (cname_record["name"], domain_name)
+        else:
+            fqdn = '%s.%s' % (cname_record['name'], zone_name)
 
-            if cname_record["target"] == "@":
-                target = domain_name
+        if not fqdn.startswith("*") and \
+                any(f.search(fqdn) for f in name_filters):
+            LOGGER.debug(f"Filtering CNAME record {fqdn} from processing")
+            stats["filtered_records_total"] += 1
+            continue
 
-            elif cname_record["target"].endswith("."):
-                target = cname_record["target"][:-1]
+        if cname_record['target'] == '@':
+            target = zone_name
 
-            else:
-                target = ".".join((cname_record["target"], domain_name))
+        elif cname_record['target'].endswith('.'):
+            target = cname_record['target'][:-1]
+        else:
+            target = '.'.join((cname_record['target'], zone_name))
 
-            # TODO let's say that the CNAME target here is for
-            # wildcard-target.subdomain.domain.com
-            #
-            # And an A record is set for *.subdomain.domain.com
-            #
-            # As of now, we'll have "*.subdomain.domain.com" in name_to_ips
-            # So we'll need to use a DNS lookup to find out what
-            # wildcard-target.subdomain.domain.com resolves to,
-            # when we _should_ be able to figure it out ourselves.
+        # TODO let's say that the CNAME target here is for
+        # wildcard-target.subdomain.domain.com
+        #
+        # And an A record is set for *.subdomain.domain.com
+        #
+        # As of now, we'll have "*.subdomain.domain.com" in name_to_ips
+        # So we'll need to use a DNS lookup to find out what
+        # wildcard-target.subdomain.domain.com resolves to,
+        # when we _should_ be able to figure it out ourselves.
 
-            if target in name_to_ips:
-                cname_ips = name_to_ips[target]
+        if target in name_to_ips:
+            cname_ips = name_to_ips[target]
 
-            # TODO if we can't find it, somehow check if it's over a wildcard
-            # A record (or don't bother)
+        # TODO if we can't find it, somehow check if it's over a wildcard
+        # A record (or don't bother)
 
-            else:
-                cname_ips = resolve_cname_ips(target, dns_resolver)
+        else:
+            cname_ips = resolve_cname_ips(target)
+            if not cname_ips:
+                stats["ns_exceptions_total"] += 1
 
-            for ip in cname_ips:
-                ip_to_names[ip].add(fqdn)
+        for ip in cname_ips:
+            ip_to_names[ip].add(fqdn)
 
-    return ip_to_names
+    return ip_to_names, stats
 
 
 def resolve_cname_ips(fqdn: str,
@@ -486,6 +529,17 @@ def main():
         help="If set, load zone information from the provided JSON file "
         "instead of requesting zone transfers from nameservers at runtime",
     )
+    parser.add_argument(
+        "--stat-endpoint",
+        default="localhost:8081",
+        help="endpoint to emit influx-style stats to"
+    )
+    parser.add_argument(
+        "-n",
+        "--name-filters",
+        action="append",
+        help="add filters to DNS entries"
+    )
 
     args = parser.parse_args()
 
@@ -498,6 +552,11 @@ def main():
         config = json.load(f)
 
     LOGGER.setLevel(config.get("log_level", logging.WARNING))
+
+    if args.get("name_filters", []):
+        name_filters = [re.compile(f) for f in args.get("name_filters", [])]
+    else:
+        name_filters = []
 
     # Initialize a custom nameserver if configured
     resolver = dns.resolver.Resolver()
@@ -515,41 +574,60 @@ def main():
         for nameserver, zones in config.get("nameserver_zones", dict()).items():
             for zone in zones:
                 zone_records[zone] = fetch_dns_records(nameserver, zone)
+    all_stats = dict()
 
-    # get a mapping of IP addresses to the names they serve
-    ip_to_names = parse_dns_dict(zone_records, resolver)
-
-    # Default to 30 days as the minium allowed time to not alert on
-    # a certificate being close to expiration
-    cert_findings = get_cert_findings(
-        ip_to_names,
-        config.get("ssl_ports", [443]),
-        config.get("min_time_to_expiration", 2592000)
-    )
-
-    # Raise warnings and errors for our gathered findings
-    for result in cert_findings:
-        alert_str = "%s:%s - %s - %s" % (
-            result["ip_address"],
-            result["port"],
-            result["fqdn"],
-            result["message"],
+    for zone in zone_records.keys():
+        start_process = time.time()
+        # get a mapping of IP addresses to the names they serve
+        ip_to_names, zone_stats = parse_dns_dict(
+            zone_records[zone],
+            zone,
+            resolver,
+            name_filters
         )
 
-        if result["status"] == "warning":
-            LOGGER.warning(alert_str)
+        # Default to 30 days as the minium allowed time to not alert on
+        # a certificate being close to expiration
+        cert_findings = get_cert_findings(
+            ip_to_names,
+            config.get("ssl_ports", [443]),
+            config.get("min_time_to_expiration", 2592000)
+        )
 
-        elif result["status"] == "error":
-            LOGGER.error(alert_str)
+        zone_stats["cert_warnings_total"] = 0
+        zone_stats["cert_errors_total"] = 0
+        # Raise warnings and errors for our gathered findings
+        for result in cert_findings:
+            alert_str = "%s:%s - %s - %s" % (
+                result["ip_address"],
+                result["port"],
+                result["fqdn"],
+                result["message"],
+            )
 
-    if args.output_csv:
-        if cert_findings:
-            with open(args.output_csv, "w") as f:
-                dw = csv.DictWriter(f, fieldnames=cert_findings[0].keys())
-                dw.writeheader()
-                dw.writerows(cert_findings)
-        else:
-            LOGGER.info("No results to write to CSV")
+            if result["status"] == "warning":
+                LOGGER.warning(alert_str)
+                zone_stats["cert_warnings_total"] += 1
+
+            elif result["status"] == "error":
+                LOGGER.error(alert_str)
+                zone_stats["cert_errors_total"] += 1
+
+        zone_stats["process_time_secs"] = time.time() - start_process
+        if args.output_csv:
+            if cert_findings:
+                with open(args.output_csv, "w") as f:
+                    dw = csv.DictWriter(f, fieldnames=cert_findings[0].keys())
+                    dw.writeheader()
+                    dw.writerows(cert_findings)
+            else:
+                LOGGER.info("No results to write to CSV")
+
+        all_stats[zone] = zone_stats
+
+    # we emit all stats at the end of the run to make stats generally line up for all zones
+    for zone, stats in all_stats.items():
+        _emit_stats(args["stat_endpoint"], "dns", stats, {"zone": zone})
 
 
 if __name__ == "__main__":
