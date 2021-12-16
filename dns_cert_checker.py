@@ -33,16 +33,18 @@ from nassl._nassl import OpenSSLError
 import os
 import re
 import socket
-from sslyze.errors import (ConnectionToServerFailed,
-                           ConnectionToServerTimedOut,
-                           ServerRejectedConnection,
-                           ServerTlsConfigurationNotSupported)
+import time
+from sslyze.errors import (
+    ConnectionToServerFailed,
+    ConnectionToServerTimedOut,
+    ServerRejectedConnection,
+    ServerTlsConfigurationNotSupported,
+)
 from sslyze.plugins.scan_commands import ScanCommand
 from sslyze.scanner import Scanner, ServerScanRequest
 from sslyze.scanner.server_scan_request import ServerScanResult
 from sslyze.server_connectivity import ServerConnectivityTester
 from sslyze.server_setting import ServerNetworkLocationViaDirectConnection
-import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 RUN_TIME_TIMESTAMP = int(time.time())
@@ -52,10 +54,7 @@ LOGGER = logging.getLogger()
 
 
 def _emit_stats(
-    endpoint: str,
-    metric: str,
-    fields: Dict[str, float],
-    tags: Dict[str, str]
+    endpoint: str, metric: str, fields: Dict[str, float], tags: Dict[str, str]
 ):
     """
     Emit stats in influx format to a UDP endpoint.
@@ -95,8 +94,12 @@ def parse_dns_dict(
         (according to the provided dns resolver)
     :rtype: Dict[str, Set[str]], Dict[int, int, int, int]
     """
-    stats = {"cname_records_total": 0, "a_records_total": 0,
-             "filtered_records_total": 0, "ns_exceptions_total": 0}
+    stats = {
+        "cname_records_total": 0,
+        "a_records_total": 0,
+        "filtered_records_total": 0,
+        "ns_exceptions_total": 0,
+    }
 
     ip_to_names = defaultdict(lambda: set())
     name_to_ips = defaultdict(lambda: set())
@@ -110,25 +113,24 @@ def parse_dns_dict(
         # Pull all A and CNAME records,
         # but do not process them yet
 
-        if record['type'] == 'A':
+        if record["type"] == "A":
             domain_a_records.append(record)
             stats["a_records_total"] += 1
 
-        elif record['type'] == 'CNAME':
+        elif record["type"] == "CNAME":
             domain_cname_records.append(record)
             stats["cname_records_total"] += 1
 
     # Process the A records first,
     # so we can populate a name -> IP mapping
     for a_record in domain_a_records:
-        if a_record['name'] == '@':
+        if a_record["name"] == "@":
             fqdn = zone_name
 
         else:
-            fqdn = '%s.%s' % (a_record['name'], zone_name)
+            fqdn = "%s.%s" % (a_record["name"], zone_name)
 
-        if not fqdn.startswith("*") and \
-                any(f.search(fqdn) for f in name_filters):
+        if not fqdn.startswith("*") and any(f.search(fqdn) for f in name_filters):
             LOGGER.debug(f"Filtering A record {fqdn} from processing")
             stats["filtered_records_total"] += 1
             continue
@@ -138,31 +140,30 @@ def parse_dns_dict(
         #
         # But since they're wildcard, the star is a valid subdomain!
         # Thus, we can test on it and ignore other subdomains
-        name_to_ips[fqdn].add(a_record['target'])
-        ip_to_names[a_record['target']].add(fqdn)
+        name_to_ips[fqdn].add(a_record["target"])
+        ip_to_names[a_record["target"]].add(fqdn)
 
     # Now that we have a populated name -> IP mapping,
     # resolve all of the CNAMEs with as few network name lookups as possible
     for cname_record in domain_cname_records:
-        if cname_record['name'] == '@':
+        if cname_record["name"] == "@":
             fqdn = zone_name
 
         else:
-            fqdn = '%s.%s' % (cname_record['name'], zone_name)
+            fqdn = "%s.%s" % (cname_record["name"], zone_name)
 
-        if not fqdn.startswith("*") and \
-                any(f.search(fqdn) for f in name_filters):
+        if not fqdn.startswith("*") and any(f.search(fqdn) for f in name_filters):
             LOGGER.debug(f"Filtering CNAME record {fqdn} from processing")
             stats["filtered_records_total"] += 1
             continue
 
-        if cname_record['target'] == '@':
+        if cname_record["target"] == "@":
             target = zone_name
 
-        elif cname_record['target'].endswith('.'):
-            target = cname_record['target'][:-1]
+        elif cname_record["target"].endswith("."):
+            target = cname_record["target"][:-1]
         else:
-            target = '.'.join((cname_record['target'], zone_name))
+            target = ".".join((cname_record["target"], zone_name))
 
         # TODO let's say that the CNAME target here is for
         # wildcard-target.subdomain.domain.com
@@ -191,9 +192,9 @@ def parse_dns_dict(
     return ip_to_names, stats
 
 
-def resolve_cname_ips(fqdn: str,
-                      dns_resolver: Optional[dns.resolver.Resolver] = None
-                      ) -> Set[str]:
+def resolve_cname_ips(
+    fqdn: str, dns_resolver: Optional[dns.resolver.Resolver] = None
+) -> Set[str]:
     """
     Resolve all of the IPs that we can get to from a single CNAME.
     If the CNAME points to another CNAME,
@@ -250,9 +251,9 @@ def sslyze_scan_all_hosts(
     scan_reqs = list()
 
     server_locations = [
-        ServerNetworkLocationViaDirectConnection(ip_address=ip,
-                                                 port=port,
-                                                 hostname=host)
+        ServerNetworkLocationViaDirectConnection(
+            ip_address=ip, port=port, hostname=host
+        )
         for (ip, port, host) in hosts_to_check
     ]
     conn_tester = ServerConnectivityTester()
@@ -410,8 +411,15 @@ def get_cert_errors(scan_result: ServerScanResult) -> List[str]:
 
             # if there is a consensus,
             # report what the first trust store had to say
-            if consensus and not cert_deployment.path_validation_results[0].was_validation_successful:
-                verify_string = cert_deployment.path_validation_results[0].openssl_error_string
+            if (
+                consensus
+                and not cert_deployment.path_validation_results[
+                    0
+                ].was_validation_successful
+            ):
+                verify_string = cert_deployment.path_validation_results[
+                    0
+                ].openssl_error_string
                 cert_errors.append(verify_string)
 
             # if there's not a consensus, report all error instances
@@ -454,9 +462,7 @@ def fetch_dns_records(nameserver_address: str, zone: str) -> List[Dict[str, str]
     :rtype: List[Dict[str, str]]
     """
     zone_records = list()
-    transfer_res = dns.zone.from_xfr(
-        dns.query.inbound_xfr(nameserver_address, zone)
-    )
+    transfer_res = dns.zone.from_xfr(dns.query.inbound_xfr(nameserver_address, zone))
 
     for record_type in ["A", "CNAME"]:
         for target, ttl, data in transfer_res.iterate_rdatas(record_type):
@@ -472,9 +478,9 @@ def fetch_dns_records(nameserver_address: str, zone: str) -> List[Dict[str, str]
     return zone_records
 
 
-def get_cert_findings(ip_to_names: Dict[str, Set[str]],
-                      ssl_ports: List[int],
-                      min_time_to_expiration: int) -> List[Dict]:
+def get_cert_findings(
+    ip_to_names: Dict[str, Set[str]], ssl_ports: List[int], min_time_to_expiration: int
+) -> List[Dict]:
     """
     Main function to check certificates for all DNS records that we found
 
@@ -532,20 +538,16 @@ def main():
     parser.add_argument(
         "--stat-endpoint",
         default="localhost:8081",
-        help="endpoint to emit influx-style stats to"
+        help="endpoint to emit influx-style stats to",
     )
     parser.add_argument(
-        "-n",
-        "--name-filters",
-        action="append",
-        help="add filters to DNS entries"
+        "-n", "--name-filters", action="append", help="add filters to DNS entries"
     )
 
     args = parser.parse_args()
 
     if not os.path.exists("config.json"):
-        print("Exiting - a configuration file must be provided "
-              "in \"config.json\"")
+        print("Exiting - a configuration file must be provided " 'in "config.json"')
         exit(1)
 
     with open("config.json", "r") as f:
@@ -580,10 +582,7 @@ def main():
         start_process = time.time()
         # get a mapping of IP addresses to the names they serve
         ip_to_names, zone_stats = parse_dns_dict(
-            zone_records[zone],
-            zone,
-            resolver,
-            name_filters
+            zone_records[zone], zone, resolver, name_filters
         )
 
         # Default to 30 days as the minium allowed time to not alert on
@@ -591,7 +590,7 @@ def main():
         cert_findings = get_cert_findings(
             ip_to_names,
             config.get("ssl_ports", [443]),
-            config.get("min_time_to_expiration", 2592000)
+            config.get("min_time_to_expiration", 2592000),
         )
 
         zone_stats["cert_warnings_total"] = 0
