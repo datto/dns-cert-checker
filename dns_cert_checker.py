@@ -85,7 +85,7 @@ def parse_dns_dict(
     dns_export: Dict[str, List[Dict]],
     zone_name: str,
     dns_resolver: Optional[dns.resolver.Resolver] = None,
-    name_filters: Optional[List] = [],
+    name_filters: Optional[List] = None,
 ) -> Dict[str, Set[str]]:
     """
     Given a Dict containing A and CNAME records for any number of zones,
@@ -98,6 +98,11 @@ def parse_dns_dict(
     :type dns_export: Dict[str, List[Dict]]
     :return: A lookup table from an IP address to the names bound to it
         (according to the provided dns resolver)
+        And a set of metrics that count:
+          * the number of cname records found
+          * the number of a records found
+          * the number records filtered
+          * the number of ns failures encountered
     :rtype: Dict[str, Set[str]], Dict[int, int, int, int]
     """
     stats = {
@@ -106,6 +111,8 @@ def parse_dns_dict(
         "filtered_records_total": 0,
         "ns_exceptions_total": 0,
     }
+    if not name_filters:
+        name_filters = list()
 
     ip_to_names = defaultdict(lambda: set())
     name_to_ips = defaultdict(lambda: set())
