@@ -55,14 +55,20 @@ LOGGER = logging.getLogger()
 
 def _emit_stats(
     endpoint: str, metric: str, fields: Dict[str, float], tags: Dict[str, str]
-):
+) -> None:
     """
     Emit stats in influx format to a UDP endpoint.
 
     :param endpoint: A string with a format of <dns endpoint>:<port>
+    :type endpoint: str
     :param metric: the name of the metric to produce
+    :type metric: str
     :param fields: a dictionary of fields and their values
+    :type fields: Dict[str, float]
     :param tags: a dictionary of tags and their values
+    :type tags: Dict[str, str]
+    :return: None
+    :rtype: None
     """
     endpoint, port = endpoint.split(":")
     tag_str = ",".join([f"{k}={v}" for k, v in tags.items()])
@@ -541,7 +547,10 @@ def main():
         help="endpoint to emit influx-style stats to",
     )
     parser.add_argument(
-        "-n", "--name-filters", action="append", help="add filters to DNS entries"
+        "-n",
+        "--name-filters",
+        action="append",
+        help="add filters to DNS entries that allow us to drop specific (regex-defined) endpoints from checking",
     )
 
     args = parser.parse_args()
@@ -555,10 +564,10 @@ def main():
 
     LOGGER.setLevel(config.get("log_level", logging.WARNING))
 
-    if args.get("name_filters", []):
-        name_filters = [re.compile(f) for f in args.get("name_filters", [])]
+    if args.get("name_filters", list()):
+        name_filters = [re.compile(f) for f in args.get("name_filters", list())]
     else:
-        name_filters = []
+        name_filters = list()
 
     # Initialize a custom nameserver if configured
     resolver = dns.resolver.Resolver()
