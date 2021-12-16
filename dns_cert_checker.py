@@ -553,12 +553,6 @@ def main():
         default="localhost:8081",
         help="endpoint to emit influx-style stats to",
     )
-    parser.add_argument(
-        "-n",
-        "--name-filters",
-        action="append",
-        help="add filters to DNS entries that allow us to drop specific (regex-defined) endpoints from checking",
-    )
 
     args = parser.parse_args()
 
@@ -571,10 +565,7 @@ def main():
 
     LOGGER.setLevel(config.get("log_level", logging.WARNING))
 
-    if args.get("name_filters", list()):
-        name_filters = [re.compile(f) for f in args.get("name_filters", list())]
-    else:
-        name_filters = list()
+    name_filters = [re.compile(f) for f in config["name_filters"]]
 
     # Initialize a custom nameserver if configured
     resolver = dns.resolver.Resolver()
