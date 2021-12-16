@@ -20,37 +20,28 @@
 # file, You can obtain one at <https://mozilla.org/MPL/2.0/>.
 
 import argparse
-from collections import defaultdict
-from concurrent.futures import as_completed
-from concurrent.futures.thread import ThreadPoolExecutor
 import csv
 import datetime
-import dns.resolver
 import json
 import logging
-import multiprocessing
-from nassl._nassl import OpenSSLError
 import os
 import re
 import socket
+import sys
 import time
-from sslyze.errors import (
-    ConnectionToServerFailed,
-    ConnectionToServerTimedOut,
-    ServerRejectedConnection,
-    ServerTlsConfigurationNotSupported,
-)
-from sslyze.plugins.scan_commands import ScanCommand
-from sslyze.scanner import Scanner, ServerScanRequest
-from sslyze.scanner.server_scan_request import ServerScanResult
-from sslyze.server_connectivity import ServerConnectivityTester
-from sslyze.server_setting import ServerNetworkLocationViaDirectConnection
+from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+
+import dns.resolver
+from sslyze import ServerNetworkLocation
+from sslyze.plugins.scan_commands import ScanCommand
+from sslyze.scanner.scanner import Scanner, ServerScanRequest, ServerScanResult
 
 RUN_TIME_TIMESTAMP = int(time.time())
 
 logging.basicConfig()
-LOGGER = logging.getLogger()
+logging.getLogger().setLevel(logging.WARNING)
+LOGGER = logging.getLogger("dns_cert_checker")
 
 
 def _emit_stats(
@@ -70,15 +61,17 @@ def _emit_stats(
     :return: None
     :rtype: None
     """
+
     endpoint, port = endpoint.split(":")
     tag_str = ",".join([f"{k}={v}" for k, v in tags.items()])
     field_str = ",".join([f"{k}={v}" for k, v in fields.items()])
     batch = f"{metric},{tag_str} {field_str}"
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.sendto(batch.encode("utf-8"), (endpoint, int(port)))
-    except Exception as e:
-        LOGGER.error(f"Failed to send ({batch}) to {endpoint}:{port} :: {e}")
+    except BaseException as e:
+        LOGGER.exception(f"Failed to send ({batch}) " f"to {endpoint}:{port} :: {e}")
 
 
 def parse_dns_dict(
@@ -105,13 +98,15 @@ def parse_dns_dict(
           * the number of ns failures encountered
     :rtype: Dict[str, Set[str]], Dict[int, int, int, int]
     """
+
     stats = {
         "cname_records_total": 0,
         "a_records_total": 0,
         "filtered_records_total": 0,
         "ns_exceptions_total": 0,
     }
-    if not name_filters:
+
+    if name_filters is None:
         name_filters = list()
 
     ip_to_names = defaultdict(lambda: set())
@@ -139,6 +134,10 @@ def parse_dns_dict(
     for a_record in domain_a_records:
         if a_record["name"] == "@":
             fqdn = zone_name
+
+        # respect FQDNs
+        elif a_record["name"].endswith("."):
+            fqdn = a_record["name"][:-1]
 
         else:
             fqdn = "%s.%s" % (a_record["name"], zone_name)
@@ -261,70 +260,23 @@ def sslyze_scan_all_hosts(
     """
 
     scanner = Scanner()
-    scan_reqs = list()
+    scan_requests = list()
 
-    server_locations = [
-        ServerNetworkLocationViaDirectConnection(
-            ip_address=ip, port=port, hostname=host
-        )
-        for (ip, port, host) in hosts_to_check
-    ]
-    conn_tester = ServerConnectivityTester()
-    LOGGER.info("starting TLS scans")
-
-    # Default to number of system threads + 2
-    if max_workers is None:
-        max_workers = multiprocessing.cpu_count() + 2
-
-    with ThreadPoolExecutor(max_workers=max_workers) as thread_pool:
-        futures = [
-            thread_pool.submit(conn_tester.perform, server_location)
-            for server_location in server_locations
-        ]
-        for completed_future in as_completed(futures):
-            try:
-                server_connectivity_info = completed_future.result()
-                scan_reqs.append(
-                    ServerScanRequest(
-                        server_info=server_connectivity_info,
-                        scan_commands={ScanCommand.CERTIFICATE_INFO},
-                    )
+    for (ip, port, host) in hosts_to_check:
+        try:
+            scan_requests.append(
+                ServerScanRequest(
+                    server_location=ServerNetworkLocation(
+                        ip_address=ip, port=port, hostname=host
+                    ),
+                    scan_commands={ScanCommand.CERTIFICATE_INFO},
                 )
+            )
+        except BaseException as be:
+            LOGGER.exception(f"Exception scanning {ip}:{port}:{host} - " f"{str(be)}")
+    LOGGER.info("Starting TLS scans")
 
-            except ServerTlsConfigurationNotSupported as ssl_config_exception:
-                si = ssl_config_exception.server_location
-                host_info_str = f"{si.ip_address}:{si.port} - {si.hostname}"
-                err_msg = f"{host_info_str}: {ssl_config_exception.error_message}"
-
-                # incompatible cipher offerings shouldn't be loudly alerted on
-                if (
-                    "could not find a TLS version and cipher suite supported by the server"
-                    in ssl_config_exception.error_message
-                ):
-                    LOGGER.debug(err_msg)
-                else:
-                    LOGGER.error(err_msg)
-
-            except OpenSSLError:
-                # TODO the exception does not include IP / port / hostname info
-                # so there's not much we can do
-                #
-                # This exception should raise an alert,
-                # but with it being multi-threaded, there's no good way
-                # of tracking with connection tests raised this exception
-                continue
-
-            except (
-                ConnectionToServerTimedOut,
-                ConnectionToServerFailed,
-                ServerRejectedConnection,
-                ServerTlsConfigurationNotSupported,
-            ):
-                # We don't care about hostnames/IPs that aren't operational
-                continue
-
-    scanner.start_scans(scan_reqs)
-
+    scanner.queue_scans(scan_requests)
     # return an iterator which may not be completed just yet
     return scanner.get_results()
 
@@ -345,13 +297,13 @@ def get_cert_warnings(
     :rtype: List[Dict[str, Union[int, str]]]
     """
 
-    si = scan_result.server_info.server_location
+    si = scan_result.server_location
 
     cert_warnings = list()
 
-    for cert_deployment in scan_result.scan_commands_results[
-        "certificate_info"
-    ].certificate_deployments:
+    for (
+        cert_deployment
+    ) in scan_result.scan_result.certificate_info.result.certificate_deployments:
         for cert in cert_deployment.received_certificate_chain:
             not_after = cert.not_valid_after.timestamp()
 
@@ -387,67 +339,59 @@ def get_cert_errors(scan_result: ServerScanResult) -> List[str]:
     :rtype: List[str]
     """
 
-    si = scan_result.server_info.server_location
+    si = scan_result.server_location
     cert_errors = list()
 
-    # If there were exceptions while scanning, return them
-    if scan_result.scan_commands_errors:
-        for (
-            scan_plugin_name,
-            scan_command_error,
-        ) in scan_result.scan_commands_errors.items():
-            cert_errors.append(scan_command_error.reason.name)
+    # This is where we used to check for exceptions that occurred during
+    # scanning, but it seems that SSLyze deals with them in 5.0
 
     # SSLyze returned no internal errors -
     # is there anything wrong with the cert itself?
-    else:
-        for cert_deployment in scan_result.scan_commands_results[
-            "certificate_info"
-        ].certificate_deployments:
+    for (
+        cert_deployment
+    ) in scan_result.scan_result.certificate_info.result.certificate_deployments:
 
-            # First check if the cert matches the hostname
-            if not cert_deployment.leaf_certificate_subject_matches_hostname:
-                cert_errors.append("subject does not match hostname")
+        # First check if the cert matches the hostname
+        if not cert_deployment.leaf_certificate_subject_matches_hostname:
+            cert_errors.append("subject does not match hostname")
 
-            # check if the chain is in a valid order
-            if not cert_deployment.received_chain_has_valid_order:
-                cert_errors.append("certificate chain does not have valid order")
+        # check if the chain is in a valid order
+        if not cert_deployment.received_chain_has_valid_order:
+            cert_errors.append("certificate chain does not have valid order")
 
-            # Now see what the trust stores think about this cert
-            #
-            # If there's a consensus, simply report one instance of it
-            trust_results = set()
-            for trust_res in cert_deployment.path_validation_results:
-                trust_results.add(trust_res.openssl_error_string)
+        # Now see what the trust stores think about this cert
+        #
+        # If there's a consensus, simply report one instance of it
+        trust_results = set()
+        for trust_res in cert_deployment.path_validation_results:
+            trust_results.add(trust_res.openssl_error_string)
 
-            consensus = len(trust_results) == 1
+        consensus = len(trust_results) == 1
 
-            # if there is a consensus,
-            # report what the first trust store had to say
-            if (
-                consensus
-                and not cert_deployment.path_validation_results[
-                    0
-                ].was_validation_successful
-            ):
-                verify_string = cert_deployment.path_validation_results[
-                    0
-                ].openssl_error_string
-                cert_errors.append(verify_string)
+        # if there is a consensus,
+        # report what the first trust store had to say
+        if (
+            consensus
+            and not cert_deployment.path_validation_results[0].was_validation_successful
+        ):
+            verify_string = cert_deployment.path_validation_results[
+                0
+            ].openssl_error_string
+            cert_errors.append(verify_string)
 
-            # if there's not a consensus, report all error instances
-            else:
-                for result in cert_deployment.path_validation_results:
+        # if there's not a consensus, report all error instances
+        else:
+            for result in cert_deployment.path_validation_results:
 
-                    # There's no issue, so we don't care
-                    if result.was_validation_successful:
-                        continue
+                # There's no issue, so we don't care
+                if result.was_validation_successful:
+                    continue
 
-                    else:
-                        store_name = result.trust_store.name
-                        error_reason = result.openssl_error_string
+                else:
+                    store_name = result.trust_store.name
+                    error_reason = result.openssl_error_string
 
-                        cert_errors.append("%s - %s" % (store_name, error_reason))
+                    cert_errors.append(f"{store_name} - {error_reason}")
 
     # Construct dict entries of the certs from their error messages
     return [
@@ -474,8 +418,19 @@ def fetch_dns_records(nameserver_address: str, zone: str) -> List[Dict[str, str]
         represented in dict format
     :rtype: List[Dict[str, str]]
     """
+
     zone_records = list()
-    transfer_res = dns.zone.from_xfr(dns.query.inbound_xfr(nameserver_address, zone))
+    try:
+        transfer_res = dns.zone.from_xfr(
+            dns.query.inbound_xfr(nameserver_address, zone)
+        )
+
+    except BaseException:
+        LOGGER.exeption(
+            f"Exception getting XFR for zone {zone} "
+            f"from nameserver {nameserver_address} - exiting"
+        )
+        sys.exit(1)
 
     for record_type in ["A", "CNAME"]:
         for target, ttl, data in transfer_res.iterate_rdatas(record_type):
@@ -519,14 +474,29 @@ def get_cert_findings(
                 scan_queue.append((ip, port, name))
 
     scan_results = sslyze_scan_all_hosts(scan_queue)
-    LOGGER.info("Completed TLS scans")
     for scan_result in scan_results:
-        result_errors = get_cert_errors(scan_result)
-        cert_findings.extend(result_errors)
 
-        # Only check for warnings if there aren't errors
-        if not result_errors:
-            cert_findings.extend(get_cert_warnings(scan_result, min_time_to_expiration))
+        # If there were issues connecting to the server,
+        # skip this scan
+        if scan_result.scan_result is None:
+            host_info = scan_result.server_location
+            LOGGER.info(
+                f"Cannot scan {host_info.ip_address}:{host_info.port} "
+                f"- {host_info.hostname} - " + scan_result.scan_status.title()
+            )
+            continue
+
+        try:
+            result_errors = get_cert_errors(scan_result)
+            cert_findings.extend(result_errors)
+
+            # Only check for warnings if there aren't errors
+            if not result_errors:
+                cert_findings.extend(
+                    get_cert_warnings(scan_result, min_time_to_expiration)
+                )
+        except BaseException as be:
+            print(" - ".join([scan_result.server_location.hostname, str(be)]))
 
     return cert_findings
 
@@ -550,15 +520,16 @@ def main():
     )
     parser.add_argument(
         "--stat-endpoint",
-        default="localhost:8081",
-        help="endpoint to emit influx-style stats to",
+        type=str,
+        default=None,
+        help="An optional endpoint to emit influx-style stats to",
     )
 
     args = parser.parse_args()
 
     if not os.path.exists("config.json"):
-        print("Exiting - a configuration file must be provided " 'in "config.json"')
-        exit(1)
+        print("Exiting - a configuration file must be provided in " '"config.json"')
+        sys.exit(1)
 
     with open("config.json", "r") as f:
         config = json.load(f)
@@ -631,9 +602,11 @@ def main():
 
         all_stats[zone] = zone_stats
 
-    # we emit all stats at the end of the run to make stats generally line up for all zones
-    for zone, stats in all_stats.items():
-        _emit_stats(args["stat_endpoint"], "dns", stats, {"zone": zone})
+    # we emit all stats at the end of the run
+    # to make stats generally line up for all zones
+    if args.stat_endpoint is not None:
+        for zone, stats in all_stats.items():
+            _emit_stats(args.stat_endpoint, "dns", stats, {"zone": zone})
 
 
 if __name__ == "__main__":
