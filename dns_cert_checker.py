@@ -536,7 +536,7 @@ def main():
 
     LOGGER.setLevel(config.get("log_level", logging.WARNING))
 
-    name_filters = [re.compile(f) for f in config["name_filters"]]
+    name_filters = [re.compile(f) for f in config.get("name_filters", list())]
 
     # Initialize a custom nameserver if configured
     resolver = dns.resolver.Resolver()
