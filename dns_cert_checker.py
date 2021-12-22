@@ -38,6 +38,7 @@ from sslyze.plugins.scan_commands import ScanCommand
 from sslyze.scanner.scanner import Scanner, ServerScanRequest, ServerScanResult
 
 RUN_TIME_TIMESTAMP = int(time.time())
+DEFAULT_SCAN_PORTS = [443]
 
 logging.basicConfig()
 logging.getLogger().setLevel(logging.WARNING)
@@ -71,7 +72,7 @@ def _emit_stats(
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.sendto(batch.encode("utf-8"), (endpoint, int(port)))
     except BaseException as e:
-        LOGGER.exception(f"Failed to send ({batch}) " f"to {endpoint}:{port} :: {e}")
+        LOGGER.exception(f"Failed to send ({batch}) to {endpoint}:{port} :: {e}")
 
 
 def parse_dns_dict(
@@ -273,7 +274,7 @@ def sslyze_scan_all_hosts(
                 )
             )
         except BaseException as be:
-            LOGGER.exception(f"Exception scanning {ip}:{port}:{host} - " f"{str(be)}")
+            LOGGER.exception(f"Exception scanning {ip}:{port}:{host} - {str(be)}")
     LOGGER.info("Starting TLS scans")
 
     scanner.queue_scans(scan_requests)
@@ -567,7 +568,7 @@ def main():
         # a certificate being close to expiration
         cert_findings = get_cert_findings(
             ip_to_names,
-            config.get("ssl_ports", [443]),
+            config.get("ssl_ports", DEFAULT_SCAN_PORTS),
             config.get("min_time_to_expiration", 2592000),
         )
 
