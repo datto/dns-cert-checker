@@ -4,14 +4,30 @@
         443
     ],
     "min_time_to_expiration": 2592000,
-    "nameserver_zones": {
-        "10.0.0.2": [
-            "company.com",
-            "internal_domain.lan"
-        ],
-        "10.0.0.3": [
-            "company-community.org"
-        ]
+    "zone_data_sources": {
+        "main_dns_server": {
+            "type": "BIND",
+            "config": {
+                "server_ip": "10.0.0.2",
+                "server_port": 53
+            },
+            "zones": [
+                "company.com",
+                "internal_domain.lan"
+            ],
+            "discover_zones": true
+        },
+        "secodary_dns_server": {
+            "type": "BIND",
+            "config": {
+                "server_ip": "10.0.0.3",
+                "server_port": 53
+            },
+            "zones": [
+                "company-community.org"
+            ],
+            "discover_zones": true
+        }
     },
     "lookup_nameservers": [
         "10.0.0.2",
@@ -19,6 +35,6 @@
         "8.8.8.8"
     ],
     "name_filters": [
-		"user.*.com"
-	]
+        "user.*.com"
+    ]
 }

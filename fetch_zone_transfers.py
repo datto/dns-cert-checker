@@ -23,11 +23,7 @@
 
 import argparse
 import json
-from collections import defaultdict
-
-import dns.resolver
-
-RECORD_TYPES = ["A", "CNAME"]
+import dns_cert_checker
 
 
 def main():
@@ -46,29 +42,14 @@ def main():
     with open("config.json", "r") as f:
         config = json.load(f)
 
-    zone_records = defaultdict(lambda: list())
-
-    for dns_server, zones in config["nameserver_zones"].items():
-        for zone in zones:
-            zone_xfr_results = dns.zone.from_xfr(dns.query.xfr(dns_server, zone))
-
-            for record_type in RECORD_TYPES:
-                for n, ttl, data in zone_xfr_results.iterate_rdatas(record_type):
-                    zone_records[zone].append(
-                        {
-                            "type": record_type,
-                            "name": str(n),
-                            "ttl": ttl,
-                            "target": str(data),
-                        }
-                    )
+    all_zone_records = dns_cert_checker.fetch_all_zone_records(config['zone_data_sources'])
 
     if args.output_file:
         with open(args.output_file, "w") as f:
-            json.dump(zone_records, f, indent=4)
+            json.dump(all_zone_records, f, indent=4)
 
     else:
-        print(json.dumps(zone_records, indent=4))
+        print(json.dumps(all_zone_records, indent=4))
 
 
 if __name__ == "__main__":
