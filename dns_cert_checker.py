@@ -33,6 +33,9 @@ from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import dns.resolver
+import dns.zone
+import dns.query 
+
 from sslyze import ServerNetworkLocation
 from sslyze.plugins.scan_commands import ScanCommand
 from sslyze.scanner.scanner import Scanner, ServerScanRequest, ServerScanResult
@@ -423,11 +426,11 @@ def fetch_dns_records(nameserver_address: str, zone: str) -> List[Dict[str, str]
     zone_records = list()
     try:
         transfer_res = dns.zone.from_xfr(
-            dns.query.inbound_xfr(nameserver_address, zone)
+            dns.query.xfr(nameserver_address, zone)
         )
 
     except BaseException:
-        LOGGER.exeption(
+        LOGGER.exception(
             f"Exception getting XFR for zone {zone} "
             f"from nameserver {nameserver_address} - exiting"
         )

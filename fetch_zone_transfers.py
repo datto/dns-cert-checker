@@ -26,6 +26,7 @@ import json
 from collections import defaultdict
 
 import dns.resolver
+import dns.zone
 
 RECORD_TYPES = ["A", "CNAME"]
 
