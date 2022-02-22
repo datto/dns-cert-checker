@@ -15,7 +15,7 @@
                 "company.com",
                 "internal_domain.lan"
             ],
-            "discover_zones": true
+            "discover_zones": false
         },
         "secodary_dns_server": {
             "type": "BIND",
@@ -25,6 +25,19 @@
             },
             "zones": [
                 "company-community.org"
+            ],
+            "discover_zones": false
+        },
+        "route53_instance":{
+            "type": "Route53",
+            "config": {
+                "aws_access_key_id": "",
+                "aws_secret_access_key": "",
+                "aws_session_token": "",
+                "discover_private_zones": true
+            },
+            "zones": [
+                "route53-hosted.com"
             ],
             "discover_zones": true
         }

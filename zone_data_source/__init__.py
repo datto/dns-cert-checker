@@ -21,9 +21,11 @@ import os
 
 from .zone_data_source import ZoneDataSource
 from .bind import BindZoneDataSource
+from .route53 import Route53ZoneDataSource
 
 name_to_class = {
-    "BIND": BindZoneDataSource
+    "BIND": BindZoneDataSource,
+    "Route53": Route53ZoneDataSource
 }
 
 pkg_dir = os.path.dirname(os.path.abspath(__file__))
