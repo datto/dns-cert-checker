@@ -19,7 +19,9 @@
 
 from typing import Dict, List, Optional, Set
 
+import dns.query
 import dns.resolver
+import dns.zone
 
 from .zone_data_source import ZoneDataSource
 
