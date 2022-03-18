@@ -37,6 +37,8 @@ from sslyze import ServerNetworkLocation
 from sslyze.plugins.scan_commands import ScanCommand
 from sslyze.scanner.scanner import Scanner, ServerScanRequest, ServerScanResult
 
+import zone_data_source
+
 RUN_TIME_TIMESTAMP = int(time.time())
 DEFAULT_SCAN_PORTS = [443]
 
@@ -117,6 +119,11 @@ def parse_dns_dict(
     domain_cname_records = list()
 
     LOGGER.info("Processing/Filtering DNS records...")
+
+    # TODO as of now "record" is the zone name, and dns_export.values()
+    # contains the actual records
+    #
+    # make sure to tie this up with the JSON import, as well
     for record in dns_export:
 
         # Pull all A and CNAME records,
@@ -407,42 +414,60 @@ def get_cert_errors(scan_result: ServerScanResult) -> List[str]:
     ]
 
 
-def fetch_dns_records(nameserver_address: str, zone: str) -> List[Dict[str, str]]:
+def fetch_all_zone_records(zone_data_sources: Dict) -> Dict[str, List[Dict]]:
+    """
+    Given valid configuration(s) for ZoneDataSources,
+    fetch all records for each zone either defined in the config,
+    or derived through the ZoneDataSource.
+
+    :param zone_data_sources: A dict of ZoneDataSource configurations
+    :type zone_data_sources: Dict
+    :return: A dict of {zone_name: [zone_record_0, ... zone_record_n]} items
+    :rtype: Dict[str, List[Dict]]
     """
 
-    :param nameserver_address: The IP address of the DNS server from which
-        to request a zone transfer for the provided zone
-    :type nameserver_address: str
-    :param zone: The zone to request a zone transfer for
-    :type zone: str
-    :return: A list of A and CNAME records for the given zone,
-        represented in dict format
-    :rtype: List[Dict[str, str]]
-    """
+    zone_records = dict()
 
-    zone_records = list()
-    try:
-        transfer_res = dns.zone.from_xfr(
-            dns.query.inbound_xfr(nameserver_address, zone)
-        )
-
-    except BaseException:
-        LOGGER.exeption(
-            f"Exception getting XFR for zone {zone} "
-            f"from nameserver {nameserver_address} - exiting"
-        )
-        sys.exit(1)
-
-    for record_type in ["A", "CNAME"]:
-        for target, ttl, data in transfer_res.iterate_rdatas(record_type):
-            zone_records.append(
-                {
-                    "type": record_type,
-                    "name": str(target),
-                    "ttl": ttl,
-                    "target": str(data),
-                }
+    for data_source_name, data_source_config in zone_data_sources.items():
+        try:
+            class_type = zone_data_source.name_to_class[data_source_config["type"]]
+        except KeyError:
+            # Continue execution even though we can't fetch this data source
+            LOGGER.error(
+                f'Invalid Zone Data Source type "{data_source_config["type"]}"'
             )
+            continue
+
+        try:
+            data_source = class_type(
+                config=data_source_config.get("config", dict()),
+                zones=data_source_config.get("zones", list()),
+                discover_zones=data_source_config.get("discover_zones", False),
+            )
+
+        except:
+            # Continue execution even though we can't fetch this data source
+            LOGGER.exception(f'Error intializing Zone Data Source "{data_source_name}"')
+            continue
+
+        # what if zones from multiple data sources conflict with each other?
+        # as of now the last to call will override all previous
+        try:
+            data_source_res = data_source.get_all_zone_contents()
+            overwritten_zones = set(data_source_res.keys()).intersection(
+                set(zone_records.keys())
+            )
+            for zone_name in overwritten_zones:
+                LOGGER.warning(
+                    f"Overwriting results for zone {zone_name} with results from Zone Data Source {data_source_name}"
+                )
+
+            zone_records.update(data_source_res)
+        except:
+            LOGGER.exception(
+                f'Error fetching records from Zone Data Source "{data_source_name}"'
+            )
+            continue
 
     return zone_records
 
@@ -552,13 +577,13 @@ def main():
             zone_records = json.load(f)
 
     else:
-        for nameserver, zones in config.get("nameserver_zones", dict()).items():
-            for zone in zones:
-                zone_records[zone] = fetch_dns_records(nameserver, zone)
+        zone_records = fetch_all_zone_records(config["zone_data_sources"])
+
     all_stats = dict()
 
     for zone in zone_records.keys():
         start_process = time.time()
+
         # get a mapping of IP addresses to the names they serve
         ip_to_names, zone_stats = parse_dns_dict(
             zone_records[zone], zone, resolver, name_filters
